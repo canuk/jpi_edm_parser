@@ -1,0 +1,29 @@
+# Bundler
+/.bundle/
+/vendor/bundle
+
+# Gem build artifacts
+*.gem
+/pkg/
+
+# RSpec
+/.rspec_status
+
+# Coverage
+/coverage/
+
+# IDE
+/.idea/
+/.vscode/
+*.swp
+*.swo
+
+# Mac
+.DS_Store
+
+# Test output
+*.csv
+!/test_data/*.csv
+
+# Local Claude settings
+.claude/
