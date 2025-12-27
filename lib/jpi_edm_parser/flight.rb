@@ -235,6 +235,10 @@ module JpiEdmParser
       previous_gps_long = nil
       previous_gps_lat = nil
 
+      # If we have valid initial GPS coordinates from the header, consider GPS initialized
+      # Some EDM models don't use the 100/100 init signal in the data stream
+      @gps_initialized = !@initial_lat.nil? && !@initial_long.nil?
+
       while offset < data.length - 5
         # Skip 1 unknown byte
         offset += 1
@@ -351,15 +355,15 @@ module JpiEdmParser
         end
 
         # Handle GPS lat/long - these are deltas from initial position
-        # We need to track the raw deltas for GPS initialization detection
-        long_delta_raw = expanded_field_flags[GPS_LONG_INDEX] != 0 ?
-                         (new_values[GPS_LONG_INDEX] - (previous_gps_long || DEFAULT_VALUE)) : 0
-        lat_delta_raw = expanded_field_flags[GPS_LAT_INDEX] != 0 ?
-                        (new_values[GPS_LAT_INDEX] - (previous_gps_lat || DEFAULT_VALUE)) : 0
+        # The delta values are already signed correctly from the diff/sign processing above
+        long_delta = expanded_field_flags[GPS_LONG_INDEX] != 0 ?
+                     (new_values[GPS_LONG_INDEX] - (previous_gps_long || DEFAULT_VALUE)) : 0
+        lat_delta = expanded_field_flags[GPS_LAT_INDEX] != 0 ?
+                    (new_values[GPS_LAT_INDEX] - (previous_gps_lat || DEFAULT_VALUE)) : 0
         previous_gps_long = new_values[GPS_LONG_INDEX]
         previous_gps_lat = new_values[GPS_LAT_INDEX]
 
-        process_gps_record!(record, long_delta_raw.abs, lat_delta_raw.abs, expanded_sign_flags)
+        process_gps_record!(record, long_delta, lat_delta)
 
         # GSPD bug workaround (stuck at 150 when no GPS)
         if record[:gspd] == 150 && gspd_bug
@@ -373,6 +377,12 @@ module JpiEdmParser
 
         # Temperature conversion based on configured output unit
         apply_temperature_conversion!(record)
+
+        # Fuel flow scaling: JPI stores ff as gph × 10, convert to actual GPH
+        apply_fuel_flow_scaling!(record)
+
+        # Voltage scaling: JPI stores volts × 10, convert to actual volts
+        apply_voltage_scaling!(record)
 
         @records << record
 
@@ -426,10 +436,24 @@ module JpiEdmParser
       ((temp * 9.0 / 5.0) + 32).round(1)
     end
 
-    def process_gps_record!(record, long_delta_abs, lat_delta_abs, sign_flags)
-      # Check for GPS initialization signal (both deltas are 100)
+    # Fuel flow is stored as gph × 10 in JPI format, convert to actual GPH
+    def apply_fuel_flow_scaling!(record)
+      if record[:ff] && record[:ff] > 0
+        record[:ff] = (record[:ff] / 10.0).round(1)
+      end
+    end
+
+    # Voltage is stored as volts × 10 in JPI format, convert to actual volts
+    def apply_voltage_scaling!(record)
+      if record[:volt] && record[:volt] > 0
+        record[:volt] = (record[:volt] / 10.0).round(1)
+      end
+    end
+
+    def process_gps_record!(record, long_delta, lat_delta)
+      # Check for GPS initialization signal (both deltas are 100 or -100)
       # Per docs: when GPS is detected, both elements are set to 100
-      if !@gps_initialized && long_delta_abs == GPS_INIT_VALUE && lat_delta_abs == GPS_INIT_VALUE
+      if !@gps_initialized && long_delta.abs == GPS_INIT_VALUE && lat_delta.abs == GPS_INIT_VALUE
         @gps_initialized = true
         # Initial position is already set from header
         record[:lat] = @initial_lat
@@ -439,14 +463,11 @@ module JpiEdmParser
 
       if @gps_initialized && @initial_lat && @initial_long
         # Apply deltas - these are in units of 1/6000 degree
-        # After initialization, deltas modify the position
-        # Sign flags indicate whether to add or subtract
-        if long_delta_abs != 0 && long_delta_abs != GPS_INIT_VALUE
-          long_delta = sign_flags[GPS_LONG_INDEX] != 0 ? -long_delta_abs : long_delta_abs
+        # Deltas are already signed correctly from the diff/sign processing
+        if long_delta != 0 && long_delta.abs != GPS_INIT_VALUE
           @gps_long_raw += long_delta
         end
-        if lat_delta_abs != 0 && lat_delta_abs != GPS_INIT_VALUE
-          lat_delta = sign_flags[GPS_LAT_INDEX] != 0 ? -lat_delta_abs : lat_delta_abs
+        if lat_delta != 0 && lat_delta.abs != GPS_INIT_VALUE
           @gps_lat_raw += lat_delta
         end
 

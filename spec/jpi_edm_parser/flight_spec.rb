@@ -153,8 +153,9 @@ RSpec.describe JpiEdmParser::Flight do
     end
 
     it 'has_gps? returns false when no GPS data present' do
-      # Flight 1197 has no GPS connected
-      expect(flight.has_gps?).to be false
+      # Flight 1199 has no GPS connected
+      no_gps_flight = file.flight(1199)
+      expect(no_gps_flight.has_gps?).to be false
     end
 
     context 'with GPS-enabled flight' do
