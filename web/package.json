@@ -1,0 +1,19 @@
+{
+  "name": "jpi-edm-parser-web",
+  "version": "0.1.0",
+  "description": "Browser-based JPI EDM engine data parser",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0"
+  }
+}

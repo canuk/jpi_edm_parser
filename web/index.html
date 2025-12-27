@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JPI EDM Parser - Open Engine Data</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f5f5f5;
+      color: #333;
+    }
+
+    h1 {
+      color: #2c5282;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: #666;
+      margin-bottom: 24px;
+    }
+
+    .drop-zone {
+      border: 3px dashed #cbd5e0;
+      border-radius: 12px;
+      padding: 48px 24px;
+      text-align: center;
+      background: white;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: #4299e1;
+      background: #ebf8ff;
+    }
+
+    .drop-zone-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    .drop-zone-text {
+      font-size: 18px;
+      color: #4a5568;
+      margin-bottom: 8px;
+    }
+
+    .drop-zone-hint {
+      font-size: 14px;
+      color: #a0aec0;
+    }
+
+    #file-input {
+      display: none;
+    }
+
+    .results {
+      display: none;
+      margin-top: 24px;
+    }
+
+    .results.visible {
+      display: block;
+    }
+
+    .file-info {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .file-info h2 {
+      margin: 0 0 12px 0;
+      font-size: 18px;
+      color: #2d3748;
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+    }
+
+    .info-item {
+      background: #f7fafc;
+      padding: 12px;
+      border-radius: 6px;
+    }
+
+    .info-label {
+      font-size: 12px;
+      color: #718096;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .info-value {
+      font-size: 18px;
+      font-weight: 600;
+      color: #2d3748;
+    }
+
+    .flights-list {
+      background: white;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .flights-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 20px;
+      background: #edf2f7;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .flights-header h3 {
+      margin: 0;
+      font-size: 16px;
+      color: #2d3748;
+    }
+
+    .flight-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 20px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .flight-row:last-child {
+      border-bottom: none;
+    }
+
+    .flight-info {
+      display: flex;
+      gap: 24px;
+      align-items: center;
+    }
+
+    .flight-number {
+      font-weight: 600;
+      color: #2c5282;
+      min-width: 80px;
+    }
+
+    .flight-date {
+      color: #4a5568;
+      min-width: 180px;
+    }
+
+    .flight-duration {
+      color: #718096;
+      min-width: 80px;
+    }
+
+    .flight-gps {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #c6f6d5;
+      color: #276749;
+    }
+
+    .flight-gps.no-gps {
+      background: #fed7d7;
+      color: #c53030;
+    }
+
+    .flight-warning {
+      font-size: 12px;
+      color: #c53030;
+    }
+
+    button {
+      background: #4299e1;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: #3182ce;
+    }
+
+    button:disabled {
+      background: #a0aec0;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: #718096;
+    }
+
+    .btn-secondary:hover {
+      background: #4a5568;
+    }
+
+    .btn-success {
+      background: #48bb78;
+    }
+
+    .btn-success:hover {
+      background: #38a169;
+    }
+
+    .error-message {
+      background: #fed7d7;
+      color: #c53030;
+      padding: 16px 20px;
+      border-radius: 8px;
+      margin-top: 16px;
+      display: none;
+    }
+
+    .error-message.visible {
+      display: block;
+    }
+
+    .privacy-note {
+      margin-top: 24px;
+      padding: 16px;
+      background: #e6fffa;
+      border-radius: 8px;
+      font-size: 14px;
+      color: #234e52;
+    }
+
+    .privacy-note strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    footer {
+      margin-top: 32px;
+      text-align: center;
+      font-size: 14px;
+      color: #718096;
+    }
+
+    footer a {
+      color: #4299e1;
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <h1>JPI EDM Parser</h1>
+  <p class="subtitle">Convert your JPI engine data files to CSV - entirely in your browser</p>
+
+  <div class="drop-zone" id="drop-zone">
+    <div class="drop-zone-icon">📁</div>
+    <div class="drop-zone-text">Drag & drop your .JPI file here</div>
+    <div class="drop-zone-hint">or click to browse</div>
+  </div>
+  <input type="file" id="file-input" accept=".jpi,.JPI">
+
+  <div class="error-message" id="error-message"></div>
+
+  <div class="results" id="results">
+    <div class="file-info">
+      <h2>File Information</h2>
+      <div class="info-grid">
+        <div class="info-item">
+          <div class="info-label">Aircraft</div>
+          <div class="info-value" id="tail-number">-</div>
+        </div>
+        <div class="info-item">
+          <div class="info-label">Model</div>
+          <div class="info-value" id="model">-</div>
+        </div>
+        <div class="info-item">
+          <div class="info-label">Flights</div>
+          <div class="info-value" id="flight-count">-</div>
+        </div>
+        <div class="info-item">
+          <div class="info-label">Downloaded</div>
+          <div class="info-value" id="download-time">-</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flights-list">
+      <div class="flights-header">
+        <h3>Flights</h3>
+        <button id="download-all" class="btn-success">Download All as ZIP</button>
+      </div>
+      <div id="flights-container"></div>
+    </div>
+  </div>
+
+  <div class="privacy-note">
+    <strong>🔒 Privacy First</strong>
+    Your data never leaves your browser. All parsing happens locally on your device -
+    no files are uploaded to any server.
+  </div>
+
+  <footer>
+    <p>
+      Part of <a href="https://openenginedata.org">Open Engine Data</a> |
+      <a href="https://github.com/your-repo/jpi-edm-parser">Source Code</a>
+    </p>
+  </footer>
+
+  <script type="module" src="/src/app.ts"></script>
+</body>
+</html>
