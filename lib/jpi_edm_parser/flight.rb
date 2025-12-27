@@ -27,8 +27,11 @@ module JpiEdmParser
     }.freeze
 
     # GPS field indices - these are deltas from initial position in header
+    # Low bytes at indices 86/87, high bytes at indices 81/82
     GPS_LONG_INDEX = 86
     GPS_LAT_INDEX = 87
+    GPS_LONG_HIGH_INDEX = 81  # High byte for longitude delta
+    GPS_LAT_HIGH_INDEX = 82   # High byte for latitude delta
     GPS_INIT_VALUE = 100  # Value that signals GPS is initialized
 
     NUM_FIELDS = 128
@@ -50,7 +53,6 @@ module JpiEdmParser
       @parse_warnings = []
       @initial_lat = nil
       @initial_long = nil
-      @gps_initialized = false
     end
 
     # Parse the flight data
@@ -228,16 +230,18 @@ module JpiEdmParser
       gspd_bug = true
       offset = 0
 
-      # GPS tracking - accumulate deltas from initial position
-      # GPS values in data are deltas in units of 1/6000 degree
-      @gps_lat_raw = @initial_lat ? (@initial_lat * 6000).round : 0
-      @gps_long_raw = @initial_long ? (@initial_long * 6000).round : 0
-      previous_gps_long = nil
-      previous_gps_lat = nil
+      # GPS 16-bit accumulation tracking
+      # GPS uses fields 81/82 (high bytes) + 86/87 (low bytes) for 16-bit deltas
+      # We track cumulative GPS values separately from standard field accumulation
+      @gps_lat_cumulative = DEFAULT_VALUE
+      @gps_long_cumulative = DEFAULT_VALUE
 
-      # If we have valid initial GPS coordinates from the header, consider GPS initialized
-      # Some EDM models don't use the 100/100 init signal in the data stream
-      @gps_initialized = !@initial_lat.nil? && !@initial_long.nil?
+      # GPS stabilization tracking
+      # GPS values during acquisition fluctuate wildly before stabilizing
+      # We count consecutive stable readings and track last good position
+      @gps_stable_count = 0
+      @last_good_gps_lat = nil
+      @last_good_gps_long = nil
 
       while offset < data.length - 5
         # Skip 1 unknown byte
@@ -317,16 +321,24 @@ module JpiEdmParser
         end
 
         # Read and calculate values
+        # Also capture raw unsigned delta bytes for GPS high/low byte fields
         new_values = Array.new(NUM_FIELDS)
+        gps_raw_deltas = {}  # Capture raw bytes for GPS before sign/accumulation
 
         NUM_FIELDS.times do |k|
           value = previous_values[k]
 
           if expanded_field_flags[k] != 0
             break if offset >= data.length
-            diff = data.getbyte(offset)
+            raw_byte = data.getbyte(offset)
             offset += 1
 
+            # Save raw bytes for GPS-related fields (81=long_hi, 82=lat_hi, 86=long_lo, 87=lat_lo)
+            if [GPS_LONG_HIGH_INDEX, GPS_LAT_HIGH_INDEX, GPS_LONG_INDEX, GPS_LAT_INDEX].include?(k)
+              gps_raw_deltas[k] = raw_byte
+            end
+
+            diff = raw_byte
             diff = -diff if expanded_sign_flags[k] != 0
 
             if value.nil? && diff == 0
@@ -354,16 +366,33 @@ module JpiEdmParser
           end
         end
 
-        # Handle GPS lat/long - these are deltas from initial position
-        # The delta values are already signed correctly from the diff/sign processing above
-        long_delta = expanded_field_flags[GPS_LONG_INDEX] != 0 ?
-                     (new_values[GPS_LONG_INDEX] - (previous_gps_long || DEFAULT_VALUE)) : 0
-        lat_delta = expanded_field_flags[GPS_LAT_INDEX] != 0 ?
-                    (new_values[GPS_LAT_INDEX] - (previous_gps_lat || DEFAULT_VALUE)) : 0
-        previous_gps_long = new_values[GPS_LONG_INDEX]
-        previous_gps_lat = new_values[GPS_LAT_INDEX]
+        # Handle GPS lat/long - these are 16-bit deltas from initial position
+        # High bytes at fields 81/82 combine with low bytes at 86/87
+        # The sign flag from the low byte applies to the entire 16-bit delta value
+        long_lo_changed = expanded_field_flags[GPS_LONG_INDEX] != 0
+        lat_lo_changed = expanded_field_flags[GPS_LAT_INDEX] != 0
+        long_hi_changed = expanded_field_flags[GPS_LONG_HIGH_INDEX] != 0
+        lat_hi_changed = expanded_field_flags[GPS_LAT_HIGH_INDEX] != 0
 
-        process_gps_record!(record, long_delta, lat_delta)
+        # Compute 16-bit GPS deltas from raw bytes
+        if long_lo_changed
+          long_lo = gps_raw_deltas[GPS_LONG_INDEX] || 0
+          long_hi = long_hi_changed ? (gps_raw_deltas[GPS_LONG_HIGH_INDEX] || 0) : 0
+          long_delta = long_hi_changed ? ((long_hi << 8) | long_lo) : long_lo
+          long_delta = -long_delta if expanded_sign_flags[GPS_LONG_INDEX] != 0
+          @gps_long_cumulative += long_delta
+        end
+
+        if lat_lo_changed
+          lat_lo = gps_raw_deltas[GPS_LAT_INDEX] || 0
+          lat_hi = lat_hi_changed ? (gps_raw_deltas[GPS_LAT_HIGH_INDEX] || 0) : 0
+          lat_delta = lat_hi_changed ? ((lat_hi << 8) | lat_lo) : lat_lo
+          lat_delta = -lat_delta if expanded_sign_flags[GPS_LAT_INDEX] != 0
+          @gps_lat_cumulative += lat_delta
+        end
+
+        process_gps_record!(record, @gps_long_cumulative, @gps_lat_cumulative,
+                            long_lo_changed, lat_lo_changed)
 
         # GSPD bug workaround (stuck at 150 when no GPS)
         if record[:gspd] == 150 && gspd_bug
@@ -450,34 +479,132 @@ module JpiEdmParser
       end
     end
 
-    def process_gps_record!(record, long_delta, lat_delta)
-      # Check for GPS initialization signal (both deltas are 100 or -100)
-      # Per docs: when GPS is detected, both elements are set to 100
-      if !@gps_initialized && long_delta.abs == GPS_INIT_VALUE && lat_delta.abs == GPS_INIT_VALUE
-        @gps_initialized = true
-        # Initial position is already set from header
-        record[:lat] = @initial_lat
-        record[:long] = @initial_long
+    def process_gps_record!(record, gps_long_value, gps_lat_value, long_changed, lat_changed)
+      # GPS values are deltas from the header position, relative to a baseline value.
+      # The baseline is normally DEFAULT_VALUE (240), but when values exceed 512 during
+      # GPS acquisition, an additional offset must be applied:
+      #   - lat baseline: 240 + 512 = 752 when lat values >= 512
+      #   - long baseline: 240 + 1024 = 1264 when long values >= 512
+      #
+      # Formula: lat = header_lat + (gps_lat_value - lat_baseline) / 6000.0
+      #          long = header_long + (gps_long_value - long_baseline) / 6000.0
+      #
+      # Value of 0 means no GPS data has been received yet
+      # During GPS acquisition, values may fluctuate wildly before stabilizing
+      # We filter by checking that position changes are reasonable
+
+      # No header GPS = no GPS output
+      unless @initial_lat && @initial_long
+        record[:lat] = nil
+        record[:long] = nil
         return
       end
 
-      if @gps_initialized && @initial_lat && @initial_long
-        # Apply deltas - these are in units of 1/6000 degree
-        # Deltas are already signed correctly from the diff/sign processing
-        if long_delta != 0 && long_delta.abs != GPS_INIT_VALUE
-          @gps_long_raw += long_delta
-        end
-        if lat_delta != 0 && lat_delta.abs != GPS_INIT_VALUE
-          @gps_lat_raw += lat_delta
-        end
+      # Detect junk "Kansas" GPS header (39.05, -94.88) - this is a default/placeholder
+      # value the EDM stores when GPS isn't properly initialized.
+      @kansas_junk_header = ((@initial_lat - 39.05).abs < 0.1 && (@initial_long - (-94.88)).abs < 0.1)
 
-        record[:lat] = @gps_lat_raw / 6000.0
-        record[:long] = @gps_long_raw / 6000.0
-      else
-        # No GPS data
+      # Value of 0 means no GPS data yet
+      if gps_long_value == 0 && gps_lat_value == 0
         record[:lat] = nil
         record[:long] = nil
+        @gps_stable_count = 0
+        @last_good_gps_long = nil
+        @last_good_gps_lat = nil
+        @gps_candidate_lat = nil
+        @gps_candidate_long = nil
+        return
       end
+
+      # GPS values are now 16-bit cumulative values (accumulated from DEFAULT_VALUE = 240)
+      # Formula: lat = header_lat + (cumulative_value - 240) / 6000.0
+      lat_offset = (gps_lat_value - DEFAULT_VALUE) / 6000.0
+      long_offset = (gps_long_value - DEFAULT_VALUE) / 6000.0
+      lat = @initial_lat + lat_offset
+      long = @initial_long + long_offset
+
+      # GPS stability filter: require consecutive similar readings before outputting
+      # This filters out junk data during GPS acquisition phase
+      # We use two tracking variables:
+      #   @gps_candidate_* : the previous reading we're comparing against for stability
+      #   @last_good_gps_* : the last reading we actually output (for continuity check)
+      max_jump = 0.02  # ~1.3 miles - max reasonable change per interval
+
+      # For Kansas header flights, allow large jumps until we've stabilized at non-Kansas GPS
+      # The Kansas position (39.05, -94.88) is a placeholder during GPS acquisition
+      # Track non-Kansas output count separately from total output count
+      @gps_output_count ||= 0
+      @gps_non_kansas_count ||= 0
+
+      # Current position is "Kansas-like" if it's near the header position (within ~5 degrees)
+      is_kansas_position = @kansas_junk_header &&
+                           (lat - 39.05).abs < 5 && (long - (-94.88)).abs < 5
+
+      # Allow large jumps if we have Kansas header and haven't established stable non-Kansas GPS yet
+      allow_large_jump = @kansas_junk_header && @gps_non_kansas_count < 50
+
+      if @gps_candidate_lat && @gps_candidate_long
+        # Compare to previous candidate reading
+        lat_jump = (lat - @gps_candidate_lat).abs
+        long_jump = (long - @gps_candidate_long).abs
+
+        if !allow_large_jump && (lat_jump > max_jump || long_jump > max_jump)
+          # Position jumped from candidate - junk data, start over
+          @gps_stable_count = 1
+          @gps_candidate_lat = lat
+          @gps_candidate_long = long
+          record[:lat] = nil
+          record[:long] = nil
+          return
+        end
+
+        # Similar to candidate (or large jump allowed during acquisition) - increment stability count
+        @gps_stable_count += 1
+      else
+        # First reading - save as candidate
+        @gps_stable_count = 1
+        @gps_candidate_lat = lat
+        @gps_candidate_long = long
+        record[:lat] = nil
+        record[:long] = nil
+        return
+      end
+
+      # Require 2+ consecutive similar readings
+      if @gps_stable_count < 2
+        @gps_candidate_lat = lat
+        @gps_candidate_long = long
+        record[:lat] = nil
+        record[:long] = nil
+        return
+      end
+
+      # Check continuity with last output (if any) - prevent jumps after stable period
+      # Only apply this check after GPS is well-established (50+ non-Kansas output records)
+      # During acquisition, GPS may correct from initial junk to real position
+      if !allow_large_jump && @gps_non_kansas_count >= 50 && @last_good_gps_lat && @last_good_gps_long
+        lat_jump = (lat - @last_good_gps_lat).abs
+        long_jump = (long - @last_good_gps_long).abs
+        if lat_jump > max_jump || long_jump > max_jump
+          # Jump from last output - might be re-acquiring, reset
+          @gps_stable_count = 1
+          @gps_candidate_lat = lat
+          @gps_candidate_long = long
+          record[:lat] = nil
+          record[:long] = nil
+          return
+        end
+      end
+
+      # GPS is good - output and save
+      @gps_output_count += 1
+      @gps_non_kansas_count += 1 unless is_kansas_position
+      @last_good_gps_lat = lat
+      @last_good_gps_long = long
+      @gps_candidate_lat = lat
+      @gps_candidate_long = long
+      record[:lat] = lat.round(6)
+      record[:long] = long.round(6)
     end
 
     def generate_csv

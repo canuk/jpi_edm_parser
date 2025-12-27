@@ -257,32 +257,65 @@ Data records contain position deltas at these field indices:
 
 | Index | Field | Description |
 |-------|-------|-------------|
+| 81 | LONG_HIGH | Longitude delta HIGH BYTE (for 16-bit deltas) |
+| 82 | LAT_HIGH | Latitude delta HIGH BYTE (for 16-bit deltas) |
 | 83 | ALT | Altitude in feet |
 | 85 | GSPD | Ground speed in knots |
-| 86 | LONG_DELTA | Longitude delta (units of 1/6000 degree) |
-| 87 | LAT_DELTA | Latitude delta (units of 1/6000 degree) |
+| 86 | LONG_DELTA | Longitude delta LOW BYTE (units of 1/6000 degree) |
+| 87 | LAT_DELTA | Latitude delta LOW BYTE (units of 1/6000 degree) |
 
-**GPS Initialization Signal:**
+**16-bit GPS Deltas (IMPORTANT):**
 
-When GPS lock is first acquired, both indices 86 and 87 are set to the value 100 (0x64). This signals that GPS data is valid and the initial position from the flight header should be used as the starting point.
+GPS position deltas can be either 8-bit or 16-bit values. When the GPS needs to represent large position changes (greater than 255 units = 0.0425 degrees = ~2.9 miles), it uses 16-bit deltas by including high bytes at indices 81 (longitude) and 82 (latitude).
+
+When both high and low byte fields are present in the same record:
+```
+16-bit delta = (high_byte << 8) | low_byte
+```
+
+The sign flag from the LOW byte field (86 or 87) applies to the entire 16-bit value.
+
+This is critical for parsing GPS during acquisition when the unit may report large jumps as it locks onto satellites. A single 16-bit delta can represent up to 65535/6000 = ~10.9 degrees of position change.
+
+**GPS Initialization Signal ("Handshake"):**
+
+When GPS lock is first acquired, both indices 86 and 87 are set to the value ±100. This "handshake" signals that GPS data is now valid.
+
+**Kansas Placeholder Header:**
+
+Some GPS units (notably Garmin 430) temporarily report their headquarters location (39.05°N, -94.88°W - Olathe, Kansas) during initialization before satellite lock. If this value appears in the flight header, subsequent GPS deltas will transition the position from Kansas to the actual location once lock is acquired. This transition typically uses large 16-bit deltas (e.g., ~32000 units latitude + ~65000 units longitude to move from Kansas to California).
 
 **Applying Deltas:**
 
-After initialization, each record's delta values are added to (or subtracted from, based on sign flags) the accumulated position:
+GPS values are accumulated from an initial baseline of 240 (0xF0), the same as other fields:
 
 ```ruby
-# On GPS init signal (both deltas = 100)
-current_lat = initial_lat_from_header
-current_long = initial_long_from_header
+# Initialize cumulative values
+gps_lat_cumulative = 240
+gps_long_cumulative = 240
 
-# On subsequent records
-if sign_flag[86] == 1
-  long_raw -= delta[86]
-else
-  long_raw += delta[86]
-end
+# For each record with GPS changes:
+# 1. Read raw delta bytes
+long_lo = raw_delta[86]  # low byte
+long_hi = raw_delta[81]  # high byte (0 if not present)
+lat_lo = raw_delta[87]
+lat_hi = raw_delta[82]
 
-current_long = long_raw / 6000.0
+# 2. Combine into 16-bit delta if high byte present
+long_delta = high_byte_present[81] ? ((long_hi << 8) | long_lo) : long_lo
+lat_delta = high_byte_present[82] ? ((lat_hi << 8) | lat_lo) : lat_lo
+
+# 3. Apply sign (from low byte sign flag)
+long_delta = -long_delta if sign_flag[86]
+lat_delta = -lat_delta if sign_flag[87]
+
+# 4. Accumulate
+gps_long_cumulative += long_delta
+gps_lat_cumulative += lat_delta
+
+# 5. Convert to degrees
+lat = header_lat + (gps_lat_cumulative - 240) / 6000.0
+long = header_long + (gps_long_cumulative - 240) / 6000.0
 ```
 
 **No GPS Connected:**
@@ -313,4 +346,6 @@ JPI files typically have:
 
 ## References
 
-This specification was independently derived. No copyrighted specifications were used in its creation.
+This specification was independently derived through analysis of real JPI data files.
+
+No copyrighted specifications were used in its creation.
