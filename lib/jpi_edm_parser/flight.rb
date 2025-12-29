@@ -128,21 +128,47 @@ module JpiEdmParser
     private
 
     def find_flight_start
-      # Find the flight by searching for its flight number in big-endian
+      # Find the flight by searching for its flight number followed by a valid flags word.
+      # Just searching for flight number alone is unreliable because those bytes can appear
+      # in the middle of other flight data. Flight headers have a consistent structure:
+      #   word[0] = flight_number
+      #   word[1] = flags (typically 0x783d or similar, with bit patterns for features)
+      #
+      # Valid flags should have certain characteristics:
+      #   - Bits 12-15 typically indicate EDM model features
+      #   - Common values: 0x783d, 0x7835, 0x781d, etc.
       flight_num_bytes = [@flight_number].pack('n')
 
       # Start searching from binary_offset
       pos = @binary_offset
-      
-      # The flight data should be sequential, but we search to be safe
+
       while pos < @data.length - FLIGHT_HEADER_SIZE
         if @data[pos, 2] == flight_num_bytes
-          return pos
+          # Check if the next word looks like valid flags
+          flags_word = @data[pos + 2, 2]&.unpack1('n')
+          if flags_word && valid_flight_flags?(flags_word)
+            return pos
+          end
         end
         pos += 1
       end
 
       nil
+    end
+
+    def valid_flight_flags?(flags)
+      # Flight flags typically have specific bit patterns.
+      # The high nibble (bits 12-15) usually contains 0x7 (0111 binary)
+      # indicating standard EDM features. Values like 0x783d, 0x7835, 0x781d are common.
+      #
+      # We check that the flags look reasonable:
+      # - High nibble is 0x7 (most common) or 0x3 (some older units)
+      # - Not all zeros or all ones (invalid)
+      return false if flags == 0 || flags == 0xFFFF
+
+      high_nibble = (flags >> 12) & 0xF
+      # Accept 0x7xxx (most common) or 0x3xxx (older units) patterns
+      high_nibble == 0x7 || high_nibble == 0x3
     end
 
     def parse_flight_header
