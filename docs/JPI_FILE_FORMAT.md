@@ -121,6 +121,43 @@ Binary data immediately follows this record.
 
 ## Binary Data Section
 
+### Flight Position Calculation
+
+**Important:** The `data_words` value in $D records represents **word-aligned counts**:
+
+```
+data_words = ceiling(actual_bytes / 2)
+```
+
+This means:
+- When actual flight data length is **ODD**, `data_words * 2 = actual + 1`
+- When actual flight data length is **EVEN**, `data_words * 2 = actual`
+- The discrepancy is **ALWAYS 0 or 1 byte**, never more
+
+**Algorithm for finding flight positions:**
+
+1. Start at `binaryOffset` (immediately after `$L` header line)
+2. For each flight in order:
+   a. Calculate expected position based on cumulative `data_words * 2` of previous flights
+   b. Check **both** the expected position AND expected-1 for valid flight header
+   c. Validate by matching flight number + checking date/time/interval fields
+   d. Advance position by found offset + `data_words * 2`
+
+**Why this matters:**
+
+This is bounded checking (exactly 2 positions) rather than arbitrary searching. Without this
+understanding, parsers may fail to locate flights that start at position-1 due to the odd-length
+rounding. The issue typically manifests as "flight not found" errors for files with multiple
+flights where some have odd-length data.
+
+**Example:**
+
+If flight 125 has `data_words = 683`:
+- Expected data length = 683 × 2 = 1366 bytes
+- But actual data might be 1365 bytes (odd)
+- Next flight starts at position 1365, not 1366
+- Parser must check both positions to find it
+
 ### Flight Header (28 bytes for extended format)
 
 Each flight's data begins with a header. The header size varies by EDM model and firmware version.
