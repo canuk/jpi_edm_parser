@@ -41,10 +41,10 @@ module JpiEdmParser
     attr_reader :flight_number, :date, :flags, :interval_secs, :records, :index_entry,
                 :temperature_unit, :parse_warnings, :initial_lat, :initial_long
 
-    def initialize(index_entry:, data:, binary_offset:, config:, temperature_unit: :original)
+    def initialize(index_entry:, data:, flight_offset:, config:, temperature_unit: :original)
       @index_entry = index_entry
       @data = data
-      @binary_offset = binary_offset
+      @flight_offset = flight_offset
       @config = config
       @temperature_unit = temperature_unit
       @records = []
@@ -57,14 +57,13 @@ module JpiEdmParser
 
     # Parse the flight data
     def parse
-      # Find the start of this flight's data
-      @flight_start = find_flight_start
-      unless @flight_start
-        @parse_warnings << "Could not locate flight data start marker"
+      # Use the pre-calculated flight offset (flights are stored sequentially)
+      unless @flight_offset
+        @parse_warnings << "Flight offset not provided"
         return self
       end
 
-      @raw_data = @data[@flight_start, @data_length]
+      @raw_data = @data[@flight_offset, @data_length]
       unless @raw_data && @raw_data.length >= FLIGHT_HEADER_SIZE
         @parse_warnings << "Flight data too short (#{@raw_data&.length || 0} bytes, need #{FLIGHT_HEADER_SIZE})"
         return self
@@ -126,50 +125,6 @@ module JpiEdmParser
     end
 
     private
-
-    def find_flight_start
-      # Find the flight by searching for its flight number followed by a valid flags word.
-      # Just searching for flight number alone is unreliable because those bytes can appear
-      # in the middle of other flight data. Flight headers have a consistent structure:
-      #   word[0] = flight_number
-      #   word[1] = flags (typically 0x783d or similar, with bit patterns for features)
-      #
-      # Valid flags should have certain characteristics:
-      #   - Bits 12-15 typically indicate EDM model features
-      #   - Common values: 0x783d, 0x7835, 0x781d, etc.
-      flight_num_bytes = [@flight_number].pack('n')
-
-      # Start searching from binary_offset
-      pos = @binary_offset
-
-      while pos < @data.length - FLIGHT_HEADER_SIZE
-        if @data[pos, 2] == flight_num_bytes
-          # Check if the next word looks like valid flags
-          flags_word = @data[pos + 2, 2]&.unpack1('n')
-          if flags_word && valid_flight_flags?(flags_word)
-            return pos
-          end
-        end
-        pos += 1
-      end
-
-      nil
-    end
-
-    def valid_flight_flags?(flags)
-      # Flight flags typically have specific bit patterns.
-      # The high nibble (bits 12-15) usually contains 0x7 (0111 binary)
-      # indicating standard EDM features. Values like 0x783d, 0x7835, 0x781d are common.
-      #
-      # We check that the flags look reasonable:
-      # - High nibble is 0x7 (most common) or 0x3 (some older units)
-      # - Not all zeros or all ones (invalid)
-      return false if flags == 0 || flags == 0xFFFF
-
-      high_nibble = (flags >> 12) & 0xF
-      # Accept 0x7xxx (most common) or 0x3xxx (older units) patterns
-      high_nibble == 0x7 || high_nibble == 0x3
-    end
 
     def parse_flight_header
       # Flight header: 14 x 16-bit words, big-endian
